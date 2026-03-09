@@ -1,0 +1,10 @@
+__pycache__/
+.env
+venv/
+.python-version
+*.pyc
+real_time_translation.py
+*.csv
+*.wav
+urdu.ini
+urdu.py
