@@ -6,6 +6,7 @@ import json
 import base64
 import uuid
 import pandas as pd
+import asyncio
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import Response, JSONResponse,StreamingResponse
 # from polars import datetime
@@ -18,6 +19,10 @@ from typing import Dict,Any,List, Optional
 from openai import OpenAI
 import numpy as np
 from dotenv import load_dotenv
+
+from openai import AsyncOpenAI
+from pydantic import BaseModel
+
 # from langdetect import detect
 
 # from lingua import Language, LanguageDetectorBuilder
@@ -42,16 +47,17 @@ if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY not found in environment")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+# client2 = AsyncOpenAI(api_key=OPENAI_API_KEY)
 # File Paths
-EMPLOYEE_FILE = r"C:\Users\Lenovo\Desktop\voice_agent\backend\employee.csv"
+# EMPLOYEE_FILE = r"C:\Users\Lenovo\Desktop\voice_agent\backend\employee.csv"
 # QUESTIONS_FILE = r"C:\Users\Lenovo\Desktop\voice_agent\backend\questions.csv"
-RESPONSES_FILE = r"C:\Users\Lenovo\Desktop\voice_agent\backend\responses.csv"
+# RESPONSES_FILE = r"C:\Users\Lenovo\Desktop\voice_agent\backend\responses.csv"
 
-employee_df = pd.read_csv(EMPLOYEE_FILE)
+# employee_df = pd.read_csv(EMPLOYEE_FILE)
 
-# Combine columns and convert to a list
-full_name = (employee_df["firstname"] + " " + employee_df["lastname"]).tolist()
-print("Employee Names: ", full_name)
+# # Combine columns and convert to a list
+# full_name = (employee_df["firstname"] + " " + employee_df["lastname"]).tolist()
+# print("Employee Names: ", full_name)
 
 
 def load_questions_from_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -452,6 +458,63 @@ survey_tools = [
         }
     }
 ]
+
+class Question(BaseModel):
+    id: int
+    question: str
+    questiontypeid: int
+    options: List[str]
+
+class TranslationRequest(BaseModel):
+    languages: List[str]  # e.g. ["Urdu", "Spanish", "Arabic"]
+    questions: List[Question]
+
+
+
+# 3. Translation Logic
+async def translate_batch(target_language: str, input_data: List[dict]) -> dict:
+    """Translates the full JSON for one specific language."""
+    
+    tone = (
+        "Extremely simple language for users with low literacy. "
+        "You can use long sentences but use very low vocab. Use common everyday words. "
+        "Avoid formal or complex vocabulary."
+    )
+
+    system_prompt = f"""
+    You are a translation agent specializing in extremely simple {target_language}.
+    The reader cannot read well. Use the simplest words possible. 
+    Translate the JSON provided.
+    
+    STRICT RULES:
+    - Keep JSON structure identical.
+    - Do NOT change keys.
+    - Only translate string values.
+    - Return valid JSON only.
+    - No explanations or extra text.
+    - Style: {tone}
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(input_data, ensure_ascii=False)}
+            ],
+            temperature=0.1 # Lower temperature for more consistent JSON
+        )
+        
+        translated_text = response.choices[0].message.content
+        
+        # Strip potential markdown backticks
+        cleaned_text = re.sub(r"```json\s?|```", "", translated_text).strip()
+        
+        # Return just the list of questions
+        return json.loads(cleaned_text)
+    
+    except Exception as e:
+        return {target_language: {"error": str(e)}}
 
 
 class SurveyState:
@@ -1423,5 +1486,20 @@ async def check_input_language(
         "user_text": user_text,
         # "converted_text": converted_text
     }
+    
+@app.post("/translate")
+async def translate_questions(payload: TranslationRequest):
+    # Convert Pydantic models to standard Python dicts for OpenAI
+    input_data = [q.model_dump() for q in payload.questions]
+    
+    # Create parallel tasks for every language requested
+    tasks = [translate_batch(lang, input_data) for lang in payload.languages]
+    
+    # Run all translations concurrently
+    results = await asyncio.gather(*tasks)
+    
+    return results
+
+
     
     
