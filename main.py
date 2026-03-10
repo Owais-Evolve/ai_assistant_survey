@@ -19,7 +19,7 @@ from typing import Dict,Any,List, Optional
 from openai import OpenAI
 import numpy as np
 from dotenv import load_dotenv
-# from database import supabase
+from database import supabase
 from uuid import UUID
 
 from openai import AsyncOpenAI
@@ -314,18 +314,18 @@ def quick_intent_check(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def generate_survey_intro(questions_df, language="en", full_name=None, orchestrator=None, total_questions=None):
+async def generate_survey_intro(questions, language="en", orchestrator=None, total_questions=None):
     """
     Creates a short 2–3 line summary describing:
     - What the survey is about
     - Its general purpose
     """
     # Combine first few questions to understand theme
-    sample_questions = questions_df["question"].dropna().tolist()
+    sample_questions = [q["question"] for q in questions if q.get("question")]
 
-    combined_text = " ".join(sample_questions)
+    combined_text = " ".join(sample_questions[:5])  # limit for context
 
-    name_instruction = f"Greet {full_name} naturally." if full_name else "Greet the user naturally."
+    # name_instruction = f"Greet {full_name} naturally." if full_name else "Greet the user naturally."
 
     prompt1 = f"""
 Generate a voice-friendly survey opening in {language}.
@@ -343,8 +343,7 @@ Output format must exactly be:
 Greeting
 Introduction
 
-1. {name_instruction}
-2. Based on these questions: "{combined_text}", write a 2-3 line introduction explaining the survey that what this survey is about, tell the total count of questions {total_questions} but don't list the questions.
+- Based on these questions: "{combined_text}", write a 2-3 line introduction explaining the survey that what this survey is about, tell the total count of questions {total_questions} but don't list the questions.
 """
 
     # Assuming 'client' is defined globally in your environment
@@ -359,45 +358,30 @@ Introduction
     
     first_q = orchestrator.state.current_question()
     question_text = first_q['question']
-    options_val = first_q.get("options")
+    options_list = orchestrator.state.get_current_options()
     
-    # question_text = f"First question: {first_q['question']}" if first_q is not None else intro_text
-    # 1. Safely get the value
-    if pd.notna(options_val) and str(options_val).lower() != "nan":
+    if options_list and len(options_list) > 0:
+        # Join the options into a natural spoken string: "yes, no"
+        spoken_options = ", ".join(options_list)
+        
         if language == 'en':
-            options_text = f"Choices for this questions are: {options_val}"
-        if language == 'ur':
-            options_text = f"اس سوال کے لیے آپ کے پاس یہ آپشنز ہیں: {options_val}"
+            options_text = f"Choices for this question are: {spoken_options}."
+        elif language == 'ur':
+            options_text = f"اس سوال کے لیے آپ کے پاس یہ آپشنز ہیں: {spoken_options}۔"
     else:
+        # If there are no options, it's open-ended
         if language == 'en':
             options_text = "This is an open-ended question."
-        if language == 'ur':
+        elif language == 'ur':
             options_text = "اس سوال کا جواب آپ اپنی مرضی سے دے سکتے ہیں۔"
 
-#     prompt2 = f"""
-# You are a voice assistant conducting a survey in {language}.
-# Please read the following question to the user.
-
-# STRICT RULES:
-# - Do NOT use headings, markdown, bullet points, or numbers.
-# - Return ONLY plain text.
-# - The question and options MUST be in their exact original wordings. Do NOT paraphrase them.
-# - Translate only the conversational filler words (like "The first question is:" or "The options are:") into {language}.
-
-# Question to ask: "{question_text}"
-# {options_instruction}
-# """
-
-#     response = client.responses.create(
-#         model="gpt-4o-mini",
-#         input=prompt2,
-#         temperature=0
-#     )
-    
-    # question_text = response.output[0].content[0].text
-    print("LLM First Question Response: ", question_text + options_text)
+    print("LLM First Question Response: ", question_text + " " + options_text)
     
     return greeting_text, question_text + "\n" + options_text
+
+
+
+
 # --- Survey Logic ---
 
 # survey_tools =[
@@ -519,9 +503,29 @@ async def translate_batch(target_language: str, input_data: List[dict]) -> dict:
         return {target_language: {"error": str(e)}}
 
 
+# class SurveyState:
+#     def __init__(self, questions_df: pd.DataFrame, language: str = "en"):
+#         self.questions = questions_df
+#         self.responses: Dict[int, str] = {}
+#         self.language = language
+#         self.current_index = 0
+#         self.max_index = 0
+#         self.completed = False
+#         self.halfway = False
+#         self.q_completed = False
+
+#     def current_question(self):
+#         if self.current_index >= len(self.questions):
+#             return None
+#         return self.questions.iloc[self.current_index]
+
+#     def is_done(self):
+#         return len(self.responses) >= len(self.questions)
+
 class SurveyState:
-    def __init__(self, questions_df: pd.DataFrame, language: str = "en"):
-        self.questions = questions_df
+    # Changed from pd.DataFrame to a List of Dictionaries
+    def __init__(self, questions_data: List[Dict[str, Any]], language: str = "en"):
+        self.questions = questions_data  
         self.responses: Dict[int, str] = {}
         self.language = language
         self.current_index = 0
@@ -530,13 +534,35 @@ class SurveyState:
         self.halfway = False
         self.q_completed = False
 
-    def current_question(self):
+    def current_question(self) -> Dict[str, Any]:
+        """Returns the raw dictionary for the current question."""
         if self.current_index >= len(self.questions):
             return None
-        return self.questions.iloc[self.current_index]
+        # Removed .iloc, using standard list indexing
+        return self.questions[self.current_index]
 
-    def is_done(self):
+    def is_done(self) -> bool:
         return len(self.responses) >= len(self.questions)
+
+    # --- NEW HELPER METHODS ---
+    # Because your options are nested, these helpers will make your API logic much easier
+    
+    def get_current_question_text(self) -> str:
+        """Extracts just the main question text."""
+        q_data = self.current_question()
+        return q_data["question"] if q_data else ""
+
+    def get_current_options(self) -> List[str]:
+        """
+        Extracts the options as a simple list of strings.
+        Note: In your JSON, the option text is stored under the 'question' key inside the options array.
+        """
+        q_data = self.current_question()
+        if not q_data or "options" not in q_data:
+            return[]
+        
+        # Extracts the "question" key from each option dictionary
+        return [opt["question"] for opt in q_data["options"]]
 
 class SurveyOrchestrator:
     def __init__(self, state: SurveyState):
@@ -1059,48 +1085,145 @@ IMPORTANT:
 
     return response.choices[0].message.content.strip()
 
-@app.post("/start_session")
-async def start_session(survey_id: str = None, language: str = "en"):
-    if survey_id not in SURVEYS:
-        raise HTTPException(status_code=400, detail="Invalid survey ID")
-    questions_df = SURVEYS[survey_id]
+# @app.post("/start_session/{survey_id}/{tenant_id}")
+# async def start_session(survey_id: int, tenant_id: UUID, language: str = "en"):
+#     try:
+#         rpc_params = {
+#             "p_tenantid": str(tenant_id),
+#             "p_surveyid": survey_id
+#         }
+        
+#         # 1. Fetch data from Supabase
+#         response = supabase.rpc("get_surveyquestiondtl_by_surveyid", rpc_params).execute()
+
+#         # 2. Check if data exists
+#         if not response.data:
+#             raise HTTPException(status_code=404, detail="No questions found for this survey.")
+
+#         # 3. Initialize your updated SurveyState with the JSON data!
+#         survey_state = SurveyState(questions_data=response.data)
     
-    session_id = str(uuid.uuid4())
-    state = SurveyState(questions_df, language=language)
-    orchestrator = SurveyOrchestrator(state)
-    SESSIONS[session_id] = orchestrator
-    start_g = time.perf_counter()
-    greeting_text, question_text = await generate_survey_intro(questions_df, language,full_name[0].upper(),orchestrator , int(len(state.questions)))
-    end_g = time.perf_counter()
-    print(f"⏳ [TIMER] Survey Intro Generation took: {end_g - start_g:.2f} seconds")
     
-    start_gtts = time.perf_counter()
-    end_gtts = time.perf_counter()
-    print(f"⏳ [TIMER] greeetings Text-to-Speech Generation took: {end_gtts - start_gtts:.2f} seconds")
-    tts_id_1 = str(uuid.uuid4())
-    # tts_id_2 = str(uuid.uuid4())
-    TTS_STORE[tts_id_1] = greeting_text + question_text
-    # TTS_STORE[tts_id_2] = question_text
-    return {
-        "session_id": session_id,
-        "total_questions": int(len(state.questions)),
-        "messages": [
-            {
-                "role": "assistant",
-                "type": "greeting",
-                "text": greeting_text,
-                "audio_url": f"/tts/{tts_id_1}"
-            },
-            {
-                "role": "assistant",
-                "type": "question",
-                "question_id": 1,
-                "text": question_text,
-                # "options": options_list,
-                # "audio_url": f"/tts/{tts_id_2}"
-            }
-        ]
-    }
+#     if survey_id not in SURVEYS:
+#         raise HTTPException(status_code=400, detail="Invalid survey ID")
+#     questions_df = SURVEYS[survey_id]
+    
+#     session_id = str(uuid.uuid4())
+#     state = SurveyState(questions_df, language=language)
+#     orchestrator = SurveyOrchestrator(state)
+#     SESSIONS[session_id] = orchestrator
+#     start_g = time.perf_counter()
+#     greeting_text, question_text = await generate_survey_intro(questions_df, language,orchestrator , int(len(state.questions)))
+#     end_g = time.perf_counter()
+#     print(f"⏳ [TIMER] Survey Intro Generation took: {end_g - start_g:.2f} seconds")
+    
+#     start_gtts = time.perf_counter()
+#     end_gtts = time.perf_counter()
+#     print(f"⏳ [TIMER] greeetings Text-to-Speech Generation took: {end_gtts - start_gtts:.2f} seconds")
+#     tts_id_1 = str(uuid.uuid4())
+#     # tts_id_2 = str(uuid.uuid4())
+#     TTS_STORE[tts_id_1] = greeting_text + question_text
+#     # TTS_STORE[tts_id_2] = question_text
+#     return {
+#         "session_id": session_id,
+#         "total_questions": int(len(state.questions)),
+#         "messages": [
+#             {
+#                 "role": "assistant",
+#                 "type": "greeting",
+#                 "text": greeting_text,
+#                 "audio_url": f"/tts/{tts_id_1}"
+#             },
+#             {
+#                 "role": "assistant",
+#                 "type": "question",
+#                 "question_id": 1,
+#                 "text": question_text,
+#                 # "options": options_list,
+#                 # "audio_url": f"/tts/{tts_id_2}"
+#             }
+#         ]
+#     }
+
+
+
+@app.post("/start_session/{survey_id}/{tenant_id}")
+async def start_session(survey_id: int, tenant_id: UUID, language: str = "en"):
+    try:
+        # 1. Fetch data from Supabase
+        rpc_params = {
+            "p_tenantid": str(tenant_id),
+            "p_surveyid": survey_id
+        }
+        response = supabase.rpc("get_surveyquestiondtl_by_surveyid", rpc_params).execute()
+
+        # 2. Check if data exists (This replaces your old "if survey_id not in SURVEYS" logic)
+        if not response.data:
+            raise HTTPException(status_code=404, detail="No questions found for this survey.")
+
+        # 3. Initialize SurveyState with the JSON data
+        state = SurveyState(questions_data=response.data, language=language)
+        
+        # 4. Create Session & Orchestrator
+        session_id = str(uuid.uuid4())
+        orchestrator = SurveyOrchestrator(state)
+        SESSIONS[session_id] = orchestrator
+        
+        # 5. Generate Survey Intro
+        start_g = time.perf_counter()
+        
+        # ⚠️ IMPORTANT: I changed 'questions_df' to 'state.questions' here.
+        # Since you are passing the data to generate_survey_intro, it will now receive 
+        # the list of dictionaries instead of a pandas dataframe.
+        greeting_text, question_text = await generate_survey_intro(
+            state.questions, 
+            language, 
+            orchestrator, 
+            int(len(state.questions))
+        )
+        
+        end_g = time.perf_counter()
+        print(f"⏳[TIMER] Survey Intro Generation took: {end_g - start_g:.2f} seconds")
+        
+        # 6. Text-to-Speech Preparation
+        start_gtts = time.perf_counter()
+        tts_id_1 = str(uuid.uuid4())
+        
+        # Combine greeting and question for the audio
+        TTS_STORE[tts_id_1] = f"{greeting_text} {question_text}"
+        
+        end_gtts = time.perf_counter()
+        print(f"⏳[TIMER] Text-to-Speech setup took: {end_gtts - start_gtts:.2f} seconds")
+        
+        # 7. Return the response
+        return {
+            "session_id": session_id,
+            "total_questions": int(len(state.questions)),
+            "messages":[
+                {
+                    "role": "assistant",
+                    "type": "greeting",
+                    "text": greeting_text,
+                    "audio_url": f"/tts/{tts_id_1}"
+                },
+                {
+                    "role": "assistant",
+                    "type": "question",
+                    "question_id": 1,
+                    "text": question_text
+                }
+            ]
+        }
+
+    # Catch FastAPI HTTP exceptions so they return proper 404/400 errors
+    except HTTPException:
+        raise
+    # Catch any other unexpected errors (like Supabase connection failures)
+    except Exception as e:
+        import traceback
+        traceback.print_exc() # Prints the exact error line to your terminal
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # @app.post("/process_input")
@@ -1335,7 +1458,6 @@ async def get_summary(session_id: str):
         "audio": text_to_speech(summary_text)
     }
 
-from fastapi import HTTPException
 
 @app.get("/session_summary/{session_id}")
 async def get_session_summary(session_id: str):
@@ -1491,7 +1613,7 @@ async def translate_questions(payload: TranslationRequest):
 
 
     
-# @app.get("/questions{survey_id}{tenant_id}")
+# @app.get("/questions/{survey_id}/{tenant_id}")
 # async def get_survey_questions(survey_id: int, tenant_id: UUID):
 #     """
 #     Fetch survey question details using the Supabase RPC function.
@@ -1515,3 +1637,45 @@ async def translate_questions(payload: TranslationRequest):
 #     except Exception as e:
 #         # Return a 500 error with the exception details if something goes wrong
 #         raise HTTPException(status_code=500, detail=str(e))
+    
+    
+    
+    
+@app.get("/questions/{survey_id}/{tenant_id}")
+async def get_survey_questions(survey_id: int, tenant_id: UUID):
+    try:
+        rpc_params = {
+            "p_tenantid": str(tenant_id),
+            "p_surveyid": survey_id
+        }
+        
+        # 1. Fetch data from Supabase
+        response = supabase.rpc("get_surveyquestiondtl_by_surveyid", rpc_params).execute()
+
+        # 2. Check if data exists
+        if not response.data:
+            raise HTTPException(status_code=404, detail="No questions found for this survey.")
+
+        # 3. Initialize your updated SurveyState with the JSON data!
+        survey_state = SurveyState(questions_data=response.data)
+
+        # --- Example of how to use the helpers ---
+        current_q = survey_state.current_question()
+        q_text = survey_state.get_current_question_text()
+        options = survey_state.get_current_options()
+
+        print(f"Asking: {q_text}")
+        print(f"Choices: {options}")
+        # Output: 
+        # Asking: Have you experienced or witnessed any form of discrimination at work?
+        # Choices:['yes', 'no']
+
+        return {
+            "message": "Survey started",
+            "first_question": q_text,
+            "options": options,
+            "question_type": current_q["typename"]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))   
