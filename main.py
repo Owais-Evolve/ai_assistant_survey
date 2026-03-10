@@ -6,6 +6,7 @@ import json
 import base64
 import uuid
 import pandas as pd
+import asyncio
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import Response, JSONResponse,StreamingResponse
 # from polars import datetime
@@ -18,6 +19,10 @@ from typing import Dict,Any,List, Optional
 from openai import OpenAI
 import numpy as np
 from dotenv import load_dotenv
+
+from openai import AsyncOpenAI
+from pydantic import BaseModel
+
 # from langdetect import detect
 
 # from lingua import Language, LanguageDetectorBuilder
@@ -42,17 +47,17 @@ if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY not found in environment")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-# File Paths
-EMPLOYEE_FILE = r"C:\Users\Lenovo\Desktop\voice_agent\backend\employee.csv"
-# QUESTIONS_FILE = r"C:\Users\Lenovo\Desktop\voice_agent\backend\questions.csv"
-RESPONSES_FILE = r"C:\Users\Lenovo\Desktop\voice_agent\backend\responses.csv"
 
-employee_df = pd.read_csv(EMPLOYEE_FILE)
+# File Paths
+# EMPLOYEE_FILE = r"C:\Users\Lenovo\Desktop\voice_agent\backend\employee.csv"
+# QUESTIONS_FILE = r"C:\Users\Lenovo\Desktop\voice_agent\backend\questions.csv"
+# RESPONSES_FILE = r"C:\Users\Lenovo\Desktop\voice_agent\backend\responses.csv"
+
+# employee_df = pd.read_csv(EMPLOYEE_FILE)
 
 # Combine columns and convert to a list
-full_name = (employee_df["firstname"] + " " + employee_df["lastname"]).tolist()
-print("Employee Names: ", full_name)
-
+# full_name = (employee_df["firstname"] + " " + employee_df["lastname"]).tolist()
+# print("Employee Names: ", full_name)
 
 def load_questions_from_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Convert dataframe to questions format"""
@@ -308,7 +313,7 @@ def quick_intent_check(text: str) -> Optional[Dict[str, Any]]:
 
 async def generate_survey_intro(questions_df, language="en", full_name=None, orchestrator=None, total_questions=None):
     """
-    Creates a short 2–3 line summary describing:
+    Creates a short 2â€“3 line summary describing:
     - What the survey is about
     - Its general purpose
     """
@@ -359,12 +364,12 @@ Introduction
         if language == 'en':
             options_text = f"Choices for this questions are: {options_val}"
         if language == 'ur':
-            options_text = f"اس سوال کے لیے آپ کے پاس یہ آپشنز ہیں: {options_val}"
+            options_text = f"Ø§Ø³ Ø³ÙˆØ§Ù„ Ú©Û’ Ù„ÛŒÛ’ Ø¢Ù¾ Ú©Û’ Ù¾Ø§Ø³ ÛŒÛ Ø¢Ù¾Ø´Ù†Ø² ÛÛŒÚº: {options_val}"
     else:
         if language == 'en':
             options_text = "This is an open-ended question."
         if language == 'ur':
-            options_text = "اس سوال کا جواب آپ اپنی مرضی سے دے سکتے ہیں۔"
+            options_text = "Ø§Ø³ Ø³ÙˆØ§Ù„ Ú©Ø§ Ø¬ÙˆØ§Ø¨ Ø¢Ù¾ Ø§Ù¾Ù†ÛŒ Ù…Ø±Ø¶ÛŒ Ø³Û’ Ø¯Û’ Ø³Ú©ØªÛ’ ÛÛŒÚºÛ”"
 
 #     prompt2 = f"""
 # You are a voice assistant conducting a survey in {language}.
@@ -453,6 +458,58 @@ survey_tools = [
     }
 ]
 
+class Question(BaseModel):
+    id: int
+    question: str
+    questiontypeid: int
+    options: List[str]
+
+class TranslationRequest(BaseModel):
+    languages: List[str]  # e.g. ["Urdu", "Spanish", "Arabic"]
+    questions: List[Question]
+
+# 3. Translation Logic
+async def translate_batch(target_language: str, input_data: List[dict]) -> dict:
+    """Translates the full JSON for one specific language."""
+    
+    tone = (
+        "Extremely simple language for users with low literacy. "
+        "You can use long sentences but use very low vocab. Use common everyday words. "
+        "Avoid formal or complex vocabulary."
+    )
+
+    system_prompt = f"""
+    You are a translation agent specializing in extremely simple {target_language}.
+    The reader cannot read well. Use the simplest words possible. 
+    Translate the JSON provided.
+    
+    STRICT RULES:
+    - Keep JSON structure identical.
+    - Do NOT change keys.
+    - Only translate string values.
+    - Return valid JSON only.
+    - No explanations or extra text.
+    - Style: {tone}
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(input_data, ensure_ascii=False)}
+            ],
+            temperature=0.3 # Lower temperature for more consistent JSON
+        )
+        
+        translated_text = response.choices[0].message.content
+        # Clean potential markdown backticks from LLM response
+        cleaned_text = translated_text.replace("```json", "").replace("```", "").strip()
+        return {target_language: json.loads(cleaned_text)}
+    
+    except Exception as e:
+        return {target_language: {"error": str(e)}}
+
 
 class SurveyState:
     def __init__(self, questions_df: pd.DataFrame, language: str = "en"):
@@ -484,7 +541,7 @@ class SurveyOrchestrator:
     #         if detected_language == 'en':
     #             return "I couldn't hear anything. Could you please repeat that?"
     #         if detected_language == 'ur':
-    #             return "معذرت، میں کچھ سن نہیں سکا۔ کیا آپ اسے دوبارہ دہرا سکتے ہیں؟"
+    #             return "Ù…Ø¹Ø°Ø±ØªØŒ Ù…ÛŒÚº Ú©Ú†Ú¾ Ø³Ù† Ù†ÛÛŒÚº Ø³Ú©Ø§Û” Ú©ÛŒØ§ Ø¢Ù¾ Ø§Ø³Û’ Ø¯ÙˆØ¨Ø§Ø±Û Ø¯ÛØ±Ø§ Ø³Ú©ØªÛ’ ÛÛŒÚºØŸ"
 
         
     #     # intent = quick_intent_check(user_input)
@@ -496,7 +553,7 @@ class SurveyOrchestrator:
     #         if detected_language == 'en':
     #             return f"Here is your summary so far:\n{self.get_summary(detected_language)}."
     #         if detected_language == 'ur':
-    #             return f"اب تک کا خلاصہ یہ ہے:\n{self.get_summary(detected_language)}"
+    #             return f"Ø§Ø¨ ØªÚ© Ú©Ø§ Ø®Ù„Ø§ØµÛ ÛŒÛ ÛÛ’:\n{self.get_summary(detected_language)}"
 
 
     #     # SUBMIT
@@ -505,7 +562,7 @@ class SurveyOrchestrator:
     #             if detected_language == 'en':
     #                 return f"Please answer all questions before submitting.\n{self.get_summary(detected_language)}"
     #             if detected_language == 'ur':
-    #                 return f"براہِ کرم جمع کروانے سے پہلے تمام سوالات کے جوابات دیں۔\nخلاصہ:\n{self.get_summary(detected_language)}"
+    #                 return f"Ø¨Ø±Ø§ÛÙ Ú©Ø±Ù… Ø¬Ù…Ø¹ Ú©Ø±ÙˆØ§Ù†Û’ Ø³Û’ Ù¾ÛÙ„Û’ ØªÙ…Ø§Ù… Ø³ÙˆØ§Ù„Ø§Øª Ú©Û’ Ø¬ÙˆØ§Ø¨Ø§Øª Ø¯ÛŒÚºÛ”\nØ®Ù„Ø§ØµÛ:\n{self.get_summary(detected_language)}"
 
             
     #         self.save_responses(session_id)
@@ -514,7 +571,7 @@ class SurveyOrchestrator:
     #         if detected_language == 'en':
     #             return "Survey submitted successfully. Thank you for your time!"
     #         if detected_language == 'ur':
-    #             return "سروے کامیابی سے جمع ہو گیا ہے۔ آپ کے وقت کا شکریہ!"
+    #             return "Ø³Ø±ÙˆÛ’ Ú©Ø§Ù…ÛŒØ§Ø¨ÛŒ Ø³Û’ Ø¬Ù…Ø¹ ÛÙˆ Ú¯ÛŒØ§ ÛÛ’Û” Ø¢Ù¾ Ú©Û’ ÙˆÙ‚Øª Ú©Ø§ Ø´Ú©Ø±ÛŒÛ!"
 
 
     #     # CHANGE ANSWER
@@ -526,13 +583,13 @@ class SurveyOrchestrator:
     #             if detected_language == 'en': 
     #                 return "I couldn't identify the question number. Please say 'change answer for question 1'."
     #             if detected_language == 'ur':
-    #                 return "میں سوال کا نمبر نہیں پہچان سکا۔ براہِ کرم کہیں 'سوال 1 کا جواب تبدیل کریں'۔"
+    #                 return "Ù…ÛŒÚº Ø³ÙˆØ§Ù„ Ú©Ø§ Ù†Ù…Ø¨Ø± Ù†ÛÛŒÚº Ù¾ÛÚ†Ø§Ù† Ø³Ú©Ø§Û” Ø¨Ø±Ø§ÛÙ Ú©Ø±Ù… Ú©ÛÛŒÚº 'Ø³ÙˆØ§Ù„ 1 Ú©Ø§ Ø¬ÙˆØ§Ø¨ ØªØ¨Ø¯ÛŒÙ„ Ú©Ø±ÛŒÚº'Û”"
 
     #         if qid not in self.state.responses:
     #             if detected_language == 'en':
     #                 return f"Question {qid} has not been answered yet."
     #             if detected_language == 'ur':
-    #                 return f"سوال {qid} کا جواب اب تک نہیں دیا گیا۔"
+    #                 return f"Ø³ÙˆØ§Ù„ {qid} Ú©Ø§ Ø¬ÙˆØ§Ø¨ Ø§Ø¨ ØªÚ© Ù†ÛÛŒÚº Ø¯ÛŒØ§ Ú¯ÛŒØ§Û”"
 
             
     #         self.state.current_index = qid - 1
@@ -541,14 +598,14 @@ class SurveyOrchestrator:
     #         if detected_language == 'en':
     #             return f"What is your new answer for question {qid}?"
     #         if detected_language == 'ur':
-    #             return f"سوال نمبر {qid} کے لیے آپ کا نیا جواب کیا ہے؟"
+    #             return f"Ø³ÙˆØ§Ù„ Ù†Ù…Ø¨Ø± {qid} Ú©Û’ Ù„ÛŒÛ’ Ø¢Ù¾ Ú©Ø§ Ù†ÛŒØ§ Ø¬ÙˆØ§Ø¨ Ú©ÛŒØ§ ÛÛ’ØŸ"
 
     #     question = self.state.current_question()
     #     if question is None:
     #         if detected_language == 'en':
     #             return f"The survey is complete. Here are your answers:\n{self.get_summary(detected_language)}"
     #         if detected_language == 'ur':
-    #             return f"سروے مکمل ہو گیا ہے۔ آپ کے جوابات یہ ہیں:\n{self.get_summary(detected_language)}"
+    #             return f"Ø³Ø±ÙˆÛ’ Ù…Ú©Ù…Ù„ ÛÙˆ Ú¯ÛŒØ§ ÛÛ’Û” Ø¢Ù¾ Ú©Û’ Ø¬ÙˆØ§Ø¨Ø§Øª ÛŒÛ ÛÛŒÚº:\n{self.get_summary(detected_language)}"
 
 
     #     qid = int(question["id"])
@@ -560,13 +617,13 @@ class SurveyOrchestrator:
     #             if detected_language == 'en':
     #                 options_str = f"The options are: {opts}."
     #             if detected_language == 'ur':
-    #                 options_str = f"آپ کے پاس یہ آپشنز ہیں: {opts}"
+    #                 options_str = f"Ø¢Ù¾ Ú©Û’ Ù¾Ø§Ø³ ÛŒÛ Ø¢Ù¾Ø´Ù†Ø² ÛÛŒÚº: {opts}"
                     
     #         else:
     #             if detected_language == 'en':
     #                 options_str = "No specific options. This is an open-ended question."
     #             if detected_language == 'ur':
-    #                 options_str = "کوئی مخصوص آپشنز نہیں ہیں۔ یہ ایک آزادانہ سوال ہے۔"
+    #                 options_str = "Ú©ÙˆØ¦ÛŒ Ù…Ø®ØµÙˆØµ Ø¢Ù¾Ø´Ù†Ø² Ù†ÛÛŒÚº ÛÛŒÚºÛ” ÛŒÛ Ø§ÛŒÚ© Ø¢Ø²Ø§Ø¯Ø§Ù†Û Ø³ÙˆØ§Ù„ ÛÛ’Û”"
             
     #         return f"{options_str}"
         
@@ -575,7 +632,7 @@ class SurveyOrchestrator:
     #         if detected_language == 'en':
     #             return f"Sure, I'll repeat:\n{question['question']}"
     #         if detected_language == 'ur':
-    #             return f"جی بالکل، میں دوبارہ دہرا دیتا ہوں:\n{question['question']}"
+    #             return f"Ø¬ÛŒ Ø¨Ø§Ù„Ú©Ù„ØŒ Ù…ÛŒÚº Ø¯ÙˆØ¨Ø§Ø±Û Ø¯ÛØ±Ø§ Ø¯ÛŒØªØ§ ÛÙˆÚº:\n{question['question']}"
 
 
     #     # ANSWER
@@ -606,7 +663,7 @@ class SurveyOrchestrator:
     #                         if detected_language == 'en': 
     #                             return f"Sorry! I didn't Understand. Please choose one of: {opts}"
     #                         if detected_language == 'ur':
-    #                             return f"معذرت! میں سمجھ نہیں سکا۔ براہِ کرم ان میں سے کسی ایک کا انتخاب کریں: {opts}"
+    #                             return f"Ù…Ø¹Ø°Ø±Øª! Ù…ÛŒÚº Ø³Ù…Ø¬Ú¾ Ù†ÛÛŒÚº Ø³Ú©Ø§Û” Ø¨Ø±Ø§ÛÙ Ú©Ø±Ù… Ø§Ù† Ù…ÛŒÚº Ø³Û’ Ú©Ø³ÛŒ Ø§ÛŒÚ© Ú©Ø§ Ø§Ù†ØªØ®Ø§Ø¨ Ú©Ø±ÛŒÚº: {opts}"
 
     #             # else:
     #             #     return f"Sorry! I didn't Understand. Please answer in selected language. The options are: <options>{question['options']}</options>"
@@ -624,7 +681,7 @@ class SurveyOrchestrator:
     #             if detected_language == 'en':
     #                 return f"Your Response is {mapped}\n\nGreat! You've answered all questions.\n{self.get_summary(detected_language)}\n\nSay 'submit' to finalize."
     #             if detected_language == 'ur':
-    #                 return f"آپ کا جواب ہے {mapped}\n\nزبردست! آپ نے تمام سوالات کے جوابات دے دیے ہیں۔\n{self.get_summary(detected_language)}\nفائنل کرنے کے لیے 'جمع کریں' یا 'submit' کہیں۔"
+    #                 return f"Ø¢Ù¾ Ú©Ø§ Ø¬ÙˆØ§Ø¨ ÛÛ’ {mapped}\n\nØ²Ø¨Ø±Ø¯Ø³Øª! Ø¢Ù¾ Ù†Û’ ØªÙ…Ø§Ù… Ø³ÙˆØ§Ù„Ø§Øª Ú©Û’ Ø¬ÙˆØ§Ø¨Ø§Øª Ø¯Û’ Ø¯ÛŒÛ’ ÛÛŒÚºÛ”\n{self.get_summary(detected_language)}\nÙØ§Ø¦Ù†Ù„ Ú©Ø±Ù†Û’ Ú©Û’ Ù„ÛŒÛ’ 'Ø¬Ù…Ø¹ Ú©Ø±ÛŒÚº' ÛŒØ§ 'submit' Ú©ÛÛŒÚºÛ”"
 
             
     #         options_val = next_q.get("options")
@@ -632,14 +689,14 @@ class SurveyOrchestrator:
     #             if detected_language == 'en':    
     #                 options_text = f"Choices for this questions are: {options_val}"
     #             if detected_language == 'ur':
-    #                 options_text = f"اس سوال کے لیے آپ کے پاس یہ آپشنز ہیں: {options_val}"
+    #                 options_text = f"Ø§Ø³ Ø³ÙˆØ§Ù„ Ú©Û’ Ù„ÛŒÛ’ Ø¢Ù¾ Ú©Û’ Ù¾Ø§Ø³ ÛŒÛ Ø¢Ù¾Ø´Ù†Ø² ÛÛŒÚº: {options_val}"
 
     #         else:
                 
     #             if detected_language == 'en':
     #                 options_text = "This is an open-ended question."
     #             if detected_language == 'ur':
-    #                 options_text = "اس سوال کا جواب آپ اپنی مرضی سے دے سکتے ہیں۔"
+    #                 options_text = "Ø§Ø³ Ø³ÙˆØ§Ù„ Ú©Ø§ Ø¬ÙˆØ§Ø¨ Ø¢Ù¾ Ø§Ù¾Ù†ÛŒ Ù…Ø±Ø¶ÛŒ Ø³Û’ Ø¯Û’ Ø³Ú©ØªÛ’ ÛÛŒÚºÛ”"
 
                 
     #         if(self.state.current_index >= int(len(self.state.questions)) /2 and self.state.halfway == False):
@@ -648,18 +705,18 @@ class SurveyOrchestrator:
     #             if detected_language == 'en':
     #                 return f"Your Response is {mapped} \n\nYou're halfway through! Keep going. \nNext question: Question: \n{self.state.current_index+1} {next_q['question']}\n{options_text}"
     #             if detected_language == 'ur':
-    #                 return f"آپ کا جواب ہے {mapped} \n\nآدھا راستہ طے ہو گیا! بس ہمت جاری رکھیں۔ \nاگلا سوال: سوال {self.state.current_index+1}: {next_q['question']}\n{options_text}"
+    #                 return f"Ø¢Ù¾ Ú©Ø§ Ø¬ÙˆØ§Ø¨ ÛÛ’ {mapped} \n\nØ¢Ø¯Ú¾Ø§ Ø±Ø§Ø³ØªÛ Ø·Û’ ÛÙˆ Ú¯ÛŒØ§! Ø¨Ø³ ÛÙ…Øª Ø¬Ø§Ø±ÛŒ Ø±Ú©Ú¾ÛŒÚºÛ” \nØ§Ú¯Ù„Ø§ Ø³ÙˆØ§Ù„: Ø³ÙˆØ§Ù„ {self.state.current_index+1}: {next_q['question']}\n{options_text}"
 
     #         if detected_language == 'en':
     #             return f"Your Response is {mapped} \n\nGot it. Next question: Question:  {self.state.current_index+1} {next_q['question']}\n{options_text}"
     #         if detected_language == 'ur':
-    #             return f"آپ کا جواب ہے {mapped} \n\nٹھیک ہے، اگلا سوال یہ رہا: سوال {self.state.current_index+1}: {next_q['question']}\n{options_text}"
+    #             return f"Ø¢Ù¾ Ú©Ø§ Ø¬ÙˆØ§Ø¨ ÛÛ’ {mapped} \n\nÙ¹Ú¾ÛŒÚ© ÛÛ’ØŒ Ø§Ú¯Ù„Ø§ Ø³ÙˆØ§Ù„ ÛŒÛ Ø±ÛØ§: Ø³ÙˆØ§Ù„ {self.state.current_index+1}: {next_q['question']}\n{options_text}"
 
 
     #     if detected_language == 'en':    
     #         return "I'm sorry, I didn't understand. Could you please answer the question or ask for options?"
     #     if detected_language == 'ur':
-    #         return "معذرت، میں سمجھ نہیں سکا۔ براہِ کرم سوال کا جواب دیں یا آپشنز کے بارے میں پوچھیں۔"
+    #         return "Ù…Ø¹Ø°Ø±ØªØŒ Ù…ÛŒÚº Ø³Ù…Ø¬Ú¾ Ù†ÛÛŒÚº Ø³Ú©Ø§Û” Ø¨Ø±Ø§ÛÙ Ú©Ø±Ù… Ø³ÙˆØ§Ù„ Ú©Ø§ Ø¬ÙˆØ§Ø¨ Ø¯ÛŒÚº ÛŒØ§ Ø¢Ù¾Ø´Ù†Ø² Ú©Û’ Ø¨Ø§Ø±Û’ Ù…ÛŒÚº Ù¾ÙˆÚ†Ú¾ÛŒÚºÛ”"
 
     
     
@@ -667,7 +724,7 @@ class SurveyOrchestrator:
         # 1. Handle silent/empty audio instantly
         if not user_text.strip():
             # Quick fallback if Whisper heard nothing
-            return "Please repeat that." if self.state.language == "en" else "براہ کرم دوبارہ کہیں۔"
+            return "Please repeat that." if self.state.language == "en" else "Ø¨Ø±Ø§Û Ú©Ø±Ù… Ø¯ÙˆØ¨Ø§Ø±Û Ú©ÛÛŒÚºÛ”"
 
         # 2. Gather State Information for the LLM
         current_q = self.state.current_question()
@@ -806,7 +863,7 @@ class SurveyOrchestrator:
                     self.state.current_index = target_qid - 1
                 # self.state.max_index -=1
             else:
-                return "You haven't reached that question yet." if expected_lang == "en" else "آپ ابھی اس سوال تک نہیں پہنچے۔" 
+                return "You haven't reached that question yet." if expected_lang == "en" else "Ø¢Ù¾ Ø§Ø¨Ú¾ÛŒ Ø§Ø³ Ø³ÙˆØ§Ù„ ØªÚ© Ù†ÛÛŒÚº Ù¾ÛÙ†Ú†Û’Û”" 
 
         elif intent == "submit" and self.state.is_done():
             self.save_responses(session_id)
@@ -843,11 +900,11 @@ class SurveyOrchestrator:
                 lines.append(f"Question {qid}: {ans}")
             return " \n".join(lines)
         if detected_language == 'ur':
-            lines = ["آپ کے جوابات کا خلاصہ یہ ہے:\n"]
+            lines = ["Ø¢Ù¾ Ú©Û’ Ø¬ÙˆØ§Ø¨Ø§Øª Ú©Ø§ Ø®Ù„Ø§ØµÛ ÛŒÛ ÛÛ’:\n"]
             for _, row in self.state.questions.iterrows():
                 qid = int(row["id"])
-                ans = self.state.responses.get(qid, "جواب نہیں دیا گیا")
-                lines.append(f"سوال نمبر {qid}: {ans}")
+                ans = self.state.responses.get(qid, "Ø¬ÙˆØ§Ø¨ Ù†ÛÛŒÚº Ø¯ÛŒØ§ Ú¯ÛŒØ§")
+                lines.append(f"Ø³ÙˆØ§Ù„ Ù†Ù…Ø¨Ø± {qid}: {ans}")
             return " \n".join(lines)
 
 
@@ -1007,7 +1064,7 @@ async def start_session(survey_id: str = None, language: str = "en"):
     start_g = time.perf_counter()
     greeting_text, question_text = await generate_survey_intro(questions_df, language,full_name[0].upper(),orchestrator , int(len(state.questions)))
     end_g = time.perf_counter()
-    print(f"⏳ [TIMER] Survey Intro Generation took: {end_g - start_g:.2f} seconds")
+    print(f"â³ [TIMER] Survey Intro Generation took: {end_g - start_g:.2f} seconds")
     # question_tts = client.audio.speech.create(
     #     model="tts-1",
     #     voice="alloy",
@@ -1020,7 +1077,7 @@ async def start_session(survey_id: str = None, language: str = "en"):
     # question_audio = text_to_speech(question_text)
     # greeting_audio = text_to_speech(greeting_text)
     end_gtts = time.perf_counter()
-    print(f"⏳ [TIMER] greeetings Text-to-Speech Generation took: {end_gtts - start_gtts:.2f} seconds")
+    print(f"â³ [TIMER] greeetings Text-to-Speech Generation took: {end_gtts - start_gtts:.2f} seconds")
     # greeting_tts = client.audio.speech.create(
     #     model="tts-1",
     #     voice="alloy",
@@ -1081,7 +1138,7 @@ async def start_session(survey_id: str = None, language: str = "en"):
 #             # language=orchestrator.state.language
 #         )
 #         end_stt = time.perf_counter()
-#         print(f"⏳ [TIMER] Whisper Transcription took: {end_stt - start_stt:.2f} seconds")
+#         print(f"â³ [TIMER] Whisper Transcription took: {end_stt - start_stt:.2f} seconds")
         
 #         user_text = transcription.text.strip()
 #         detected_lang_enum = detector.detect_language_of(user_text)
@@ -1102,7 +1159,7 @@ async def start_session(survey_id: str = None, language: str = "en"):
 #             print(f"Language Mismatch! Expected {expected_lang}, got {detected_lang}")
         
 #             if expected_lang == "ur":
-#                 reject_msg = "براہ کرم اپنا جواب اردو میں دیں۔" # "Please answer in Urdu"
+#                 reject_msg = "Ø¨Ø±Ø§Û Ú©Ø±Ù… Ø§Ù¾Ù†Ø§ Ø¬ÙˆØ§Ø¨ Ø§Ø±Ø¯Ùˆ Ù…ÛŒÚº Ø¯ÛŒÚºÛ”" # "Please answer in Urdu"
 #             else:
 #                 reject_msg = "Please provide your answer in English."
 #             tts_id = str(uuid.uuid4())
@@ -1124,7 +1181,7 @@ async def start_session(survey_id: str = None, language: str = "en"):
 #     start_hi = time.perf_counter()
 #     agent_text = orchestrator.handle_input(user_text, session_id, detected_language=detected_lang)
 #     end_hi = time.perf_counter()
-#     print(f"⏳ [TIMER] handle input took: {end_hi - start_hi:.2f} seconds")
+#     print(f"â³ [TIMER] handle input took: {end_hi - start_hi:.2f} seconds")
 #     # 4. Now you have the final, correctly translated text!
 #     # agent_text = response.choices[0].message.content
 #     print(f"Agent: {agent_text}")
@@ -1161,7 +1218,7 @@ async def start_session(survey_id: str = None, language: str = "en"):
 #         "audio_url": f"/tts/{tts_id}"  # NEW: Pass a URL!
 #     })
 #     end_tts = time.perf_counter()
-#     # print(f"⏳ [TIMER] TTS generation took: {end_tts - start_tts:.2f} seconds")
+#     # print(f"â³ [TIMER] TTS generation took: {end_tts - start_tts:.2f} seconds")
     
 #     if detected_lang == "ur" and detected_lang_enum == Language.HINDI:
 #         convert_prompt = f"""
@@ -1205,7 +1262,7 @@ async def process_input(
             file=(audio.filename or "audio.webm", audio_bytes, audio.content_type or "audio/webm")
         )
         end_stt = time.perf_counter()
-        print(f"⏳ [TIMER] Whisper Transcription took: {end_stt - start_stt:.2f} seconds")
+        print(f"â³ [TIMER] Whisper Transcription took: {end_stt - start_stt:.2f} seconds")
         
         user_text = transcription.text.strip()
         print(f"User text: {user_text}")
@@ -1221,7 +1278,7 @@ async def process_input(
     agent_text = orchestrator.handle_input(user_text, session_id) 
     
     end_hi = time.perf_counter()
-    print(f"⏳ [TIMER] Agent handle_input took: {end_hi - start_hi:.2f} seconds")
+    print(f"â³ [TIMER] Agent handle_input took: {end_hi - start_hi:.2f} seconds")
     print(f"Agent Reply: {agent_text}")
 
     # 4. Store Text for TTS Streaming
@@ -1403,7 +1460,7 @@ async def check_input_language(
         print(f"Language Mismatch! Expected {expected_lang}, got {detected_lang}")
         
         if expected_lang == "ur":
-            reject_msg = "براہ کرم اپنا جواب اردو میں دیں۔" # "Please answer in Urdu"
+            reject_msg = "Ø¨Ø±Ø§Û Ú©Ø±Ù… Ø§Ù¾Ù†Ø§ Ø¬ÙˆØ§Ø¨ Ø§Ø±Ø¯Ùˆ Ù…ÛŒÚº Ø¯ÛŒÚºÛ”" # "Please answer in Urdu"
         else:
             reject_msg = "Please provide your answer in English."
             
@@ -1423,5 +1480,25 @@ async def check_input_language(
         "user_text": user_text,
         # "converted_text": converted_text
     }
+    
+@app.post("/translate")
+async def translate_questions(payload: TranslationRequest):
+    # Convert Pydantic models to standard Python dicts for OpenAI
+    input_data = [q.model_dump() for q in payload.questions]
+    
+    # Create parallel tasks for every language requested
+    tasks = [translate_batch(lang, input_data) for lang in payload.languages]
+    
+    # Run all translations concurrently
+    results = await asyncio.gather(*tasks)
+    
+    # Combine results into a single dictionary
+    final_response = {}
+    for r in results:
+        final_response.update(r)
+        
+    return final_response
+
+
     
     
