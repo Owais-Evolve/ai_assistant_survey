@@ -19,6 +19,8 @@ from typing import Dict,Any,List, Optional
 from openai import OpenAI
 import numpy as np
 from dotenv import load_dotenv
+# from database import supabase
+from uuid import UUID
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel
@@ -511,7 +513,7 @@ async def translate_batch(target_language: str, input_data: List[dict]) -> dict:
         cleaned_text = re.sub(r"```json\s?|```", "", translated_text).strip()
         
         # Return just the list of questions
-        return json.loads(cleaned_text)
+        return {target_language: json.loads(cleaned_text)}
     
     except Exception as e:
         return {target_language: {"error": str(e)}}
@@ -1071,27 +1073,10 @@ async def start_session(survey_id: str = None, language: str = "en"):
     greeting_text, question_text = await generate_survey_intro(questions_df, language,full_name[0].upper(),orchestrator , int(len(state.questions)))
     end_g = time.perf_counter()
     print(f"⏳ [TIMER] Survey Intro Generation took: {end_g - start_g:.2f} seconds")
-    # question_tts = client.audio.speech.create(
-    #     model="tts-1",
-    #     voice="alloy",
-    #     input=question_text,
-    # )
-    # question_audio = base64.b64encode(
-    #     question_tts.content
-    # ).decode("utf-8")
+    
     start_gtts = time.perf_counter()
-    # question_audio = text_to_speech(question_text)
-    # greeting_audio = text_to_speech(greeting_text)
     end_gtts = time.perf_counter()
     print(f"⏳ [TIMER] greeetings Text-to-Speech Generation took: {end_gtts - start_gtts:.2f} seconds")
-    # greeting_tts = client.audio.speech.create(
-    #     model="tts-1",
-    #     voice="alloy",
-    #     input=greeting_text,
-    # )
-    # greeting_audio = base64.b64encode(
-    #     greeting_tts.content
-    # ).decode("utf-8")
     tts_id_1 = str(uuid.uuid4())
     # tts_id_2 = str(uuid.uuid4())
     TTS_STORE[tts_id_1] = greeting_text + question_text
@@ -1497,9 +1482,36 @@ async def translate_questions(payload: TranslationRequest):
     
     # Run all translations concurrently
     results = await asyncio.gather(*tasks)
-    
-    return results
+    final_response = {}
+    for r in results:
+        final_response.update(r)
+        
+    return final_response
+    # return results
 
 
     
-    
+# @app.get("/questions{survey_id}{tenant_id}")
+# async def get_survey_questions(survey_id: int, tenant_id: UUID):
+#     """
+#     Fetch survey question details using the Supabase RPC function.
+#     - survey_id is taken from the URL path (e.g., /api/surveys/1/questions)
+#     - tenant_id is taken from query parameters (e.g., ?tenant_id=your-uuid)
+#     """
+#     try:
+#         # 1. Prepare the parameters exactly as named in your Supabase function
+#         # Note: We convert the UUID to a string so it can be serialized to JSON
+#         rpc_params = {
+#             "p_tenantid": str(tenant_id), 
+#             "p_surveyid": survey_id
+#         }
+
+#         # 2. Call the RPC function
+#         response = supabase.rpc("get_surveyquestiondtl_by_surveyid", rpc_params).execute()
+
+#         # 3. Return the data
+#         return {"data": response.data}
+
+#     except Exception as e:
+#         # Return a 500 error with the exception details if something goes wrong
+#         raise HTTPException(status_code=500, detail=str(e))
